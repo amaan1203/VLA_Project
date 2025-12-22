@@ -3,11 +3,11 @@ import time
 import numpy as np
 
 class ArmStateLogger:
-    def __init__(self):
+    # def __init__(self):
         # Header for the console output
-        print(f"\n{'[LOG START]':=^80}")
-        print(f"{'Sim_Time':>10} | {'Real_Time':>15} | {'EE_X':>8} | {'EE_Y':>8} | {'EE_Z':>8} | {'Grip_Width':>10}")
-        print("-" * 80)
+        # print(f"\n{'[LOG START]':=^80}")
+        # print(f"{'Sim_Time':>10} | {'Real_Time':>15} | {'EE_X':>8} | {'EE_Y':>8} | {'EE_Z':>8} | {'Grip_Width':>10}")
+        # print("-" * 80)
 
     def log_state(self, obs, data):
         """
@@ -30,4 +30,4 @@ class ArmStateLogger:
                    f"{ee_pos[0]:8.3f} | {ee_pos[1]:8.3f} | {ee_pos[2]:8.3f} | "
                    f"{grip_width:10.4f}")
         
-        print(log_str)
+        # print(log_str)
