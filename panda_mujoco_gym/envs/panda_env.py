@@ -90,8 +90,13 @@ class FrankaEnv(MujocoRobotEnv):
         self.data = self._mujoco.MjData(self.model)
         self._model_names = self._utils.MujocoModelNames(self.model)
 
-        self.model.vis.global_.offwidth = self.width
-        self.model.vis.global_.offheight = self.height
+        # self.model.vis.global_.offwidth = self.width
+        # self.model.vis.global_.offheight = self.height
+        # manually changing them abhi ke lie 
+        
+        self.model.vis.global_.offwidth = 640
+        self.model.vis.global_.offheight = 480
+        
 
         # index used to distinguish arm and gripper joints
         free_joint_index = self._model_names.joint_names.index("obj_joint")
@@ -254,7 +259,7 @@ class FrankaEnv(MujocoRobotEnv):
         return True
 
     def _mujoco_step(self, action: Optional[np.ndarray] = None) -> None:
-        for _ in range(10):
+        #for _ in range(10):
             self._mujoco.mj_step(self.model, self.data, nstep=self.n_substeps)
 
     # custom methods

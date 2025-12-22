@@ -1,7 +1,21 @@
 import os
 from panda_mujoco_gym.envs.panda_env import FrankaEnv
 
+import mujoco
+import mujoco.viewer
+import numpy as np
+import cv2 # You'll need OpenCV for displaying/handling the image
+
+
+
+
+
+
 MODEL_XML_PATH = os.path.join(os.path.dirname(__file__), "../assets/", "pick_and_place.xml")
+
+m = mujoco.MjModel.from_xml_path(MODEL_XML_PATH)
+d = mujoco.MjData(m)
+renderer = mujoco.Renderer(m, height=480, width=640)
 
 
 class FrankaPickAndPlaceEnv(FrankaEnv):

@@ -1,4 +1,10 @@
 <mujoco model="panda">
+
+    <visual>
+      <global offwidth="640" />
+    </visual>
+
+
     <default>
       <default class="panda">
 
@@ -117,7 +123,7 @@
   
     <worldbody>
 
-        <camera name="front_cam" pos="1.2 0 0.5" quat="0.5 0.5 0.5 0.5" fovy="45"/>
+        <camera name="front_cam1" pos="1.2 0 0.5" quat="0.5 0.5 0.5 0.5" fovy="45"/>
 
         <light name="top" pos="0 0 2" mode="trackcom"/>
       
