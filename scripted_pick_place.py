@@ -5,23 +5,32 @@ import mujoco
 import cv2
 import time
 from arm_state_logger import ArmStateLogger 
+import os
+from gymnasium.envs.mujoco.mujoco_env import MujocoEnv
 
+os.environ["MUJOCO_GL"] = "egl"
+os.environ["NVIDIA_VISIBLE_DEVICES"] = "0"
+env = gym.make("FrankaPickAndPlaceDense-v0", render_mode="rgb_array")
 
-env = gym.make("FrankaPickAndPlaceDense-v0", render_mode="human")
-
-mj_env = env.unwrapped
+mj_env: MujocoEnv = env.unwrapped # type: ignore
 model = mj_env.model
 data = mj_env.data
+
+video_out = cv2.VideoWriter('robot_dashboard.mp4', cv2.VideoWriter_fourcc(*'mp4v'), 30, (640, 720)) # type: ignore
 
 main_renderer = mujoco.Renderer(model, height=480, width=640)
 cam_renderer = mujoco.Renderer(model, height=240, width=320)
 
+print(f"Using MuJoCo GL Backend: {os.environ['MUJOCO_GL']}")
+
 DRIFT_HISTORY = []
 START_REAL_TIME = time.time()
+BASE_REAL_TIME = time.time()
 
-arm_logger = ArmStateLogger()
+# Fixed initialization
+total_step_t0 = time.perf_counter()
+
 obs, info = env.reset()
-
 
 def get_ee_pos(obs):
     return obs["observation"][:3]
@@ -35,15 +44,8 @@ def get_goal_pos(obs):
 def clip_action(action, max_delta=0.05):
     return np.clip(action, -max_delta, max_delta)
 
-
-main_renderer = mujoco.Renderer(model, height=480, width=640)
-cam_renderer = mujoco.Renderer(model, height=240, width=320)
-
-BASE_REAL_TIME = time.time()
-
 def render_dashboard(obs, data):
-    
-    global BASE_REAL_TIME, START_REAL_TIME, DRIFT_HISTORY
+    global BASE_REAL_TIME, START_REAL_TIME, DRIFT_HISTORY, total_step_t0
     
     sim_time = data.time
     current_real_time = time.time() - START_REAL_TIME
@@ -53,29 +55,24 @@ def render_dashboard(obs, data):
     relative_real = time.time() - BASE_REAL_TIME
     sync_offset = (relative_real - sim_time) * 1000
 
-    
     main_renderer.update_scene(data, camera=-1) 
-    t0=time.time()
+    t_render_start = time.perf_counter()
     main_rgb = main_renderer.render() 
-    latency = (time.time() - t0) * 1000
-    print(f"Frame Latency: {latency:.2f}ms")
+    render_latency = (time.perf_counter() - t_render_start) * 1000
+    
     main_bgr = cv2.cvtColor(main_rgb, cv2.COLOR_RGB2BGR)
     
-    
     ee_pos = get_ee_pos(obs)
-    fingers = mj_env.get_fingers_width()
+    fingers = mj_env.get_fingers_width() # type: ignore
     f_val = fingers if np.isscalar(fingers) else fingers[0]
 
-    
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 0.50
     thickness = 2
     
-    
     drift_color = (0, 0, 255) if (len(DRIFT_HISTORY) > 1 and current_drift > DRIFT_HISTORY[-2]) else (0, 255, 0)
     sync_color = (0, 255, 0) if sync_offset < 100 else (0, 0, 255)
     text_color = (255, 255, 255) 
-
 
     cv2.putText(main_bgr, f"TIME: {sim_time:.2f}s", (15, 30), font, scale, text_color, thickness)
     cv2.putText(main_bgr, f"EE_X: {ee_pos[0]:.3f}", (15, 60), font, scale, text_color, thickness)
@@ -83,41 +80,60 @@ def render_dashboard(obs, data):
     cv2.putText(main_bgr, f"EE_Z: {ee_pos[2]:.3f}", (15, 120), font, scale, text_color, thickness)
     cv2.putText(main_bgr, f"GRIP: {f_val:.4f}", (15, 150), font, scale, text_color, thickness)
 
-
     cv2.putText(main_bgr, f"DRIFT: {current_drift:.1f}ms", (350, 30), font, scale, drift_color, thickness)
     cv2.putText(main_bgr, f"MAX LAG: {max(DRIFT_HISTORY):.1f}ms", (350, 60), font, scale, (0, 255, 255), thickness)
     cv2.putText(main_bgr, f"SYNC OFFSET: {sync_offset:.1f}ms", (350, 90), font, scale, sync_color, thickness)
     cv2.putText(main_bgr, f"REAL CLOCK: {current_real_time:.2f}s", (350, 120), font, scale, (200, 200, 200), thickness)
 
-   
     cam_renderer.update_scene(data, camera="front_cam")
     front_bgr = cv2.cvtColor(cam_renderer.render(), cv2.COLOR_RGB2BGR)
 
     cam_renderer.update_scene(data, camera="gripper_cam")
     gripper_bgr = cv2.cvtColor(cam_renderer.render(), cv2.COLOR_RGB2BGR)
     
-
     bottom_row = np.hstack((front_bgr, gripper_bgr))
     dashboard = np.vstack((main_bgr, bottom_row))
 
-    cv2.imshow("Robot Control Dashboard", dashboard)
-    
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        return False
-    return True
+    video_out.write(dashboard)
 
+    # Correct latency calculation
+    total_latency = (time.perf_counter() - total_step_t0) * 1000
+    print(f"Render: {render_latency:5.2f}ms | Step: {total_latency:6.2f}ms | Sync Offset: {sync_offset:7.2f}ms")
+    
+    return sync_offset
 
 from arm_state_logger import ArmStateLogger
-
-
 arm_logger = ArmStateLogger()
 
 def perform_task(target_pos, destination_pos, is_stacking=False, is_ball=False):
-    global obs
+    global obs, total_step_t0
     
-    
+    TARGET_STEP_TIME = 0.01 # 10ms target per step
+
+    def apply_throttle():
+        """Helper to apply dynamic sleep based on accumulated drift."""
+        current_sync = render_dashboard(obs, data)
+        
+        # 1. Calculate how much time this loop iteration has actually taken so far
+        loop_work_time = time.perf_counter() - total_step_t0
+        
+        # 2. Base sleep is what's left of our 10ms target
+        sleep_time = TARGET_STEP_TIME - loop_work_time
+        
+        # 3. If we have a negative offset (we are ahead), add a correction
+        # We use a 'proportional' correction (e.g., 0.5) so we don't over-correct
+        if current_sync < 0:
+            correction = (abs(current_sync) / 1000.0) * 0.5
+            sleep_time += correction 
+
+        # 4. Final check: Only sleep if there is time to kill
+        if sleep_time > 0:
+            time.sleep(sleep_time)
+
+    # 1. Targeting Position
     print(f"targeting position: {target_pos}")
     for step in range(1000):
+        total_step_t0 = time.perf_counter()
         ee_pos = get_ee_pos(obs)
         target_hover = np.array([target_pos[0], target_pos[1], target_pos[2] + 0.15])
         delta = target_hover - ee_pos
@@ -125,41 +141,41 @@ def perform_task(target_pos, destination_pos, is_stacking=False, is_ball=False):
         obs, _, _, _, _ = env.step(clip_action(action, max_delta=0.3))
         
         arm_logger.log_state(obs, data) 
-        render_dashboard(obs, data)
-        time.sleep(0.01) 
+        apply_throttle()
         if np.linalg.norm(delta[:2]) < 0.01: break
 
-    
+    # 2. Descending
     print("Descending...")
     for step in range(500):
+        total_step_t0 = time.perf_counter()
         ee_pos = get_ee_pos(obs)
         target_z = target_pos[2] - 0.005 
         action = np.array([(target_pos[0]-ee_pos[0])*15, (target_pos[1]-ee_pos[1])*15, (target_z-ee_pos[2])*5, 1.0])
         obs, _, _, _, _ = env.step(clip_action(action, max_delta=0.2))
         
         arm_logger.log_state(obs, data) 
-        render_dashboard(obs, data)
-        time.sleep(0.01) 
+        apply_throttle()
         if abs(target_z - ee_pos[2]) < 0.005: break
 
-   
+    # 3. Grasping
     print("Grasping...")
     for _ in range(60):
+        total_step_t0 = time.perf_counter()
         obs, _, _, _, _ = env.step(np.array([0, 0, 0, -1.0]))
-        
         arm_logger.log_state(obs, data)
-        render_dashboard(obs, data)
-        time.sleep(0.01) 
+        apply_throttle()
         
     if is_ball: 
         for _ in range(20):
+            total_step_t0 = time.perf_counter()
             obs, _, _, _, _ = env.step(np.array([0, 0, 0, -1.0]))
             arm_logger.log_state(obs, data) 
-            render_dashboard(obs, data)
-            time.sleep(0.01)
+            apply_throttle()
 
+    # 4. Moving to Destination
     print("Moving to destination...")
     for step in range(1200):
+        total_step_t0 = time.perf_counter()
         ee_pos = get_ee_pos(obs)
         offset_z = 0.08 if is_stacking else 0.05
         target_dest = destination_pos + np.array([0, 0, offset_z])
@@ -168,32 +184,29 @@ def perform_task(target_pos, destination_pos, is_stacking=False, is_ball=False):
         obs, _, _, _, _ = env.step(clip_action(action, max_delta=0.3))
         
         arm_logger.log_state(obs, data) 
-        render_dashboard(obs, data)
-        time.sleep(0.01) 
+        apply_throttle()
         if np.linalg.norm(delta) < 0.02: break
 
-    
+    # 5. Releasing
     print("Releasing...")
     for _ in range(50):
+        total_step_t0 = time.perf_counter()
         obs, _, _, _, _ = env.step(np.array([0, 0, 0, 1.0]))
         arm_logger.log_state(obs, data) 
-        render_dashboard(obs, data)
-        time.sleep(0.01) 
+        apply_throttle()
+
     for _ in range(30):
+        total_step_t0 = time.perf_counter()
         obs, _, _, _, _ = env.step(np.array([0, 0, 0.2, 1.0]))
         arm_logger.log_state(obs, data) 
-        render_dashboard(obs, data)
-        time.sleep(0.01)
+        apply_throttle()
 
 try:
-    
     for _ in range(5):
         obs, _, _, _, _ = env.step(np.array([0, 0, 0, 0]))
 
     cube_starting_pos = get_cube_pos(obs)
     target_goal_pos = get_goal_pos(obs)
-    
-   
     final_destination = np.array([target_goal_pos[0], target_goal_pos[1], 0.02]) 
 
     print("\nStarting unified task...")
@@ -202,4 +215,5 @@ try:
 
 finally:
     env.close()
-    cv2.destroyAllWindows()
+    video_out.release()
+    print("Video saved as robot_dashboard.mp4")
