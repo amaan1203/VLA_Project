@@ -88,12 +88,15 @@ def render_dashboard(obs, data):
     cam_renderer.update_scene(data, camera="front_cam")
     front_bgr = cv2.cvtColor(cam_renderer.render(), cv2.COLOR_RGB2BGR)
 
-    cam_renderer.update_scene(data, camera="gripper_cam")
+    cam_renderer.update_scene(data, camera="gripper_front_chase")
     gripper_bgr = cv2.cvtColor(cam_renderer.render(), cv2.COLOR_RGB2BGR)
-    
+
+    border_color = (0, 255, 255) # Yellow in BGR
+    cv2.rectangle(gripper_bgr, (0, 0), (320, 240), border_color, 10)
+    cv2.putText(gripper_bgr, "GRIPPER VIEW", (10, 30), font, 0.7, border_color, 2)
     bottom_row = np.hstack((front_bgr, gripper_bgr))
     dashboard = np.vstack((main_bgr, bottom_row))
-
+    
     video_out.write(dashboard)
 
     # Correct latency calculation
@@ -172,46 +175,75 @@ def perform_task(target_pos, destination_pos, is_stacking=False, is_ball=False):
             arm_logger.log_state(obs, data) 
             apply_throttle()
 
-    # 4. Moving to Destination
-    print("Moving to destination...")
+# --- PHASE 4: TRAVEL TO DESTINATION (STAY HIGH) ---
+    print("Moving to destination hover...")
     for step in range(1200):
         total_step_t0 = time.perf_counter()
         ee_pos = get_ee_pos(obs)
-        offset_z = 0.08 if is_stacking else 0.05
-        target_dest = destination_pos + np.array([0, 0, offset_z])
-        delta = target_dest - ee_pos
-        action = np.append(delta * 10.0, -1.0)
+        
+        # Keep the Z high (0.15) while moving horizontally to the goal
+        target_dest_hover = np.array([destination_pos[0], destination_pos[1], 0.15])
+        delta = target_dest_hover - ee_pos
+        
+        action = np.append(delta * 10.0, -1.0) # Keep gripper closed
         obs, _, _, _, _ = env.step(clip_action(action, max_delta=0.3))
         
         arm_logger.log_state(obs, data) 
         apply_throttle()
-        if np.linalg.norm(delta) < 0.02: break
+        # Only break once we are centered over the goal horizontally
+        if np.linalg.norm(delta[:2]) < 0.01: break
 
-    # 5. Releasing
-    print("Releasing...")
+    # --- NEW PHASE 5: CONTROLLED DESCENT (THE FIX) ---
+    print("Lowering to floor plane...")
+    for step in range(300):
+        total_step_t0 = time.perf_counter()
+        ee_pos = get_ee_pos(obs)
+        
+        # Target the floor surface + half the cube height (approx 0.02)
+        target_floor = np.array([destination_pos[0], destination_pos[1], 0.02]) 
+        
+        delta = target_floor - ee_pos
+        action = np.append(delta * 5.0, -1.0) # Still closed!
+        obs, _, _, _, _ = env.step(clip_action(action, max_delta=0.05))
+        
+        arm_logger.log_state(obs, data)
+        apply_throttle()
+        # Break once we are within 2mm of the floor target
+        if abs(ee_pos[2] - 0.02) < 0.002: break
+
+    # --- PHASE 6: RELEASE AND LIFT ---
+    print("Releasing on floor...")
     for _ in range(50):
         total_step_t0 = time.perf_counter()
+        # Send 1.0 to open gripper
         obs, _, _, _, _ = env.step(np.array([0, 0, 0, 1.0]))
         arm_logger.log_state(obs, data) 
         apply_throttle()
 
+    print("Clearing area...")
     for _ in range(30):
         total_step_t0 = time.perf_counter()
+        # Lift up 20cm to finish cleanly
         obs, _, _, _, _ = env.step(np.array([0, 0, 0.2, 1.0]))
         arm_logger.log_state(obs, data) 
         apply_throttle()
 
 try:
-    for _ in range(5):
+    for _ in range(10):
         obs, _, _, _, _ = env.step(np.array([0, 0, 0, 0]))
 
     cube_starting_pos = get_cube_pos(obs)
+    site_id = model.site('target').id
+    target_site_pos = data.site_xpos[site_id].copy()
     target_goal_pos = get_goal_pos(obs)
-    final_destination = np.array([target_goal_pos[0], target_goal_pos[1], 0.02]) 
+    final_destination = np.array([target_site_pos[0], target_site_pos[1], 0.0]) 
 
-    print("\nStarting unified task...")
+    print(f"\nDetecting Object at: {cube_starting_pos}")
+    print(f"Target Destination: {final_destination}")
+
+    # 4. Execute the task
     perform_task(cube_starting_pos, final_destination, is_stacking=False)
-    print("Done.")
+    print("Task Completed.")
 
 finally:
     env.close()

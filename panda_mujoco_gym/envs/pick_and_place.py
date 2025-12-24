@@ -4,7 +4,7 @@ from panda_mujoco_gym.envs.panda_env import FrankaEnv
 import mujoco
 import mujoco.viewer
 import numpy as np
-import cv2 # You'll need OpenCV for displaying/handling the image
+import cv2 
 
 
 

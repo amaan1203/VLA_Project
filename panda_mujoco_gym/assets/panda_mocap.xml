@@ -121,7 +121,9 @@
   
     <worldbody>
 
-        <camera name="front_cam1" pos="1.2 0 0.5" quat="0.5 0.5 0.5 0.5" fovy="45"/>
+        
+         <camera name="front_cam" mode="trackcom" target="hand" pos="0.8 0 0.4" quat="0.707 0 0.707 0"/>
+        <!-- <camera name="front_cam1" pos="1.2 0 0.5" quat="0.5 0.5 0.5 0.5" fovy="45"/> -->
 
         <light name="top" pos="0 0 2" mode="trackcom"/>
       
@@ -227,7 +229,7 @@
                       
 
                         <camera name="gripper_cam" pos="0 0 0.05" quat="1 0 0 0" fovy="75"/>
-
+                        <camera name="gripper_front_chase" pos="0.2 0 0.05" quat="0.5 0.5 0.5 0.5" fovy="60"/>
 
                         <inertial mass="0.73" pos="-0.01 0 0.03" diaginertia="0.001 0.0025 0.0017"/>
                         <geom mesh="hand_0" material="off_white" class="visual"/>
