@@ -12,7 +12,7 @@ os.environ["MUJOCO_GL"] = "egl"
 os.environ["NVIDIA_VISIBLE_DEVICES"] = "0"
 env = gym.make("FrankaPickAndPlaceDense-v0", render_mode="rgb_array")
 
-mj_env: MujocoEnv = env.unwrapped # type: ignore
+mj_env: MujocoEnv = env.unwrapped 
 model = mj_env.model
 data = mj_env.data
 
@@ -27,7 +27,7 @@ DRIFT_HISTORY = []
 START_REAL_TIME = time.time()
 BASE_REAL_TIME = time.time()
 
-# Fixed initialization
+
 total_step_t0 = time.perf_counter()
 
 obs, info = env.reset()
