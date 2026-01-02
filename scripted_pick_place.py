@@ -122,9 +122,8 @@ def perform_task(target_pos, destination_pos, is_stacking=False, is_ball=False):
         
         # 2. Base sleep is what's left of our 10ms target
         sleep_time = TARGET_STEP_TIME - loop_work_time
+        sleep_tim
         
-        # 3. If we have a negative offset (we are ahead), add a correction
-        # We use a 'proportional' correction (e.g., 0.5) so we don't over-correct
         if current_sync < 0:
             correction = (abs(current_sync) / 1000.0) * 0.5
             sleep_time += correction 
@@ -132,7 +131,7 @@ def perform_task(target_pos, destination_pos, is_stacking=False, is_ball=False):
         # 4. Final check: Only sleep if there is time to kill
         if sleep_time > 0:
             time.sleep(sleep_time)
-
+            
     # 1. Targeting Position
     print(f"targeting position: {target_pos}")
     for step in range(1000):
@@ -175,7 +174,6 @@ def perform_task(target_pos, destination_pos, is_stacking=False, is_ball=False):
             arm_logger.log_state(obs, data) 
             apply_throttle()
 
-# --- PHASE 4: TRAVEL TO DESTINATION (STAY HIGH) ---
     print("Moving to destination hover...")
     for step in range(1200):
         total_step_t0 = time.perf_counter()
@@ -193,7 +191,7 @@ def perform_task(target_pos, destination_pos, is_stacking=False, is_ball=False):
         # Only break once we are centered over the goal horizontally
         if np.linalg.norm(delta[:2]) < 0.01: break
 
-    # --- NEW PHASE 5: CONTROLLED DESCENT (THE FIX) ---
+   
     print("Lowering to floor plane...")
     for step in range(300):
         total_step_t0 = time.perf_counter()
