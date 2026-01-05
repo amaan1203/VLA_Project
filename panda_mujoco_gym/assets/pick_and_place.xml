@@ -24,9 +24,6 @@
   
     <worldbody>
      
-     
-
-
       <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
       <camera name="watching" pos="1.669 -1.154 1.019" xyaxes="0.644 0.765 0.000 -0.250 0.210 0.945"/> 
 

@@ -8,6 +8,8 @@ from arm_state_logger import ArmStateLogger
 import os
 from gymnasium.envs.mujoco.mujoco_env import MujocoEnv
 
+
+arm_logger = ArmStateLogger()
 os.environ["MUJOCO_GL"] = "egl"
 os.environ["NVIDIA_VISIBLE_DEVICES"] = "0"
 env = gym.make("FrankaPickAndPlaceDense-v0", render_mode="rgb_array")
@@ -71,7 +73,7 @@ def render_dashboard(obs, data):
     thickness = 2
     
     drift_color = (0, 0, 255) if (len(DRIFT_HISTORY) > 1 and current_drift > DRIFT_HISTORY[-2]) else (0, 255, 0)
-    sync_color = (0, 255, 0) if sync_offset < 100 else (0, 0, 255)
+    sync_color = (0, 255, 0) if abs(sync_offset) < 100 else (0, 0, 255)
     text_color = (255, 255, 255) 
 
     cv2.putText(main_bgr, f"TIME: {sim_time:.2f}s", (15, 30), font, scale, text_color, thickness)
@@ -82,7 +84,7 @@ def render_dashboard(obs, data):
 
     cv2.putText(main_bgr, f"DRIFT: {current_drift:.1f}ms", (350, 30), font, scale, drift_color, thickness)
     cv2.putText(main_bgr, f"MAX LAG: {max(DRIFT_HISTORY):.1f}ms", (350, 60), font, scale, (0, 255, 255), thickness)
-    cv2.putText(main_bgr, f"SYNC OFFSET: {sync_offset:.1f}ms", (350, 90), font, scale, sync_color, thickness)
+    cv2.putText(main_bgr,f"SYNC OFFSET: {sync_offset:.1f}ms",(350, 150),font,scale,sync_color,thickness)
     cv2.putText(main_bgr, f"REAL CLOCK: {current_real_time:.2f}s", (350, 120), font, scale, (200, 200, 200), thickness)
 
     cam_renderer.update_scene(data, camera="front_cam")
@@ -105,8 +107,7 @@ def render_dashboard(obs, data):
     
     return sync_offset
 
-from arm_state_logger import ArmStateLogger
-arm_logger = ArmStateLogger()
+
 
 def perform_task(target_pos, destination_pos, is_stacking=False, is_ball=False):
     global obs, total_step_t0
@@ -122,7 +123,6 @@ def perform_task(target_pos, destination_pos, is_stacking=False, is_ball=False):
         
         # 2. Base sleep is what's left of our 10ms target
         sleep_time = TARGET_STEP_TIME - loop_work_time
-        sleep_tim
         
         if current_sync < 0:
             correction = (abs(current_sync) / 1000.0) * 0.5
@@ -141,7 +141,6 @@ def perform_task(target_pos, destination_pos, is_stacking=False, is_ball=False):
         delta = target_hover - ee_pos
         action = np.append(delta * 10.0, 1.0)
         obs, _, _, _, _ = env.step(clip_action(action, max_delta=0.3))
-        
         arm_logger.log_state(obs, data) 
         apply_throttle()
         if np.linalg.norm(delta[:2]) < 0.01: break
@@ -154,7 +153,6 @@ def perform_task(target_pos, destination_pos, is_stacking=False, is_ball=False):
         target_z = target_pos[2] - 0.005 
         action = np.array([(target_pos[0]-ee_pos[0])*15, (target_pos[1]-ee_pos[1])*15, (target_z-ee_pos[2])*5, 1.0])
         obs, _, _, _, _ = env.step(clip_action(action, max_delta=0.2))
-        
         arm_logger.log_state(obs, data) 
         apply_throttle()
         if abs(target_z - ee_pos[2]) < 0.005: break

@@ -81,7 +81,8 @@ def render_dashboard(data, current_vla_action):
     if current_vla_action is not None:
         cv2.putText(main_bgr, f"VLA ACT: {np.round(current_vla_action[:3], 2)}", 
                    (350, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-    
+        
+        # print("vla-act values to debug : ", np.round(current_vla_action[:3], 2))
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 0.50
     thickness = 2
@@ -115,8 +116,7 @@ def render_dashboard(data, current_vla_action):
 
     bottom_row = np.hstack((front_bgr, gripper_bgr))
     dashboard = np.vstack((main_bgr, bottom_row))
-    
-    # ⚠️ THIS IS THE KILLER - write video frame asynchronously
+     
     try:
         video_out.write(dashboard)
     except Exception as e:
@@ -138,10 +138,10 @@ def apply_throttle_fixed(current_vla_action=None):
     sleep_needed = TARGET_STEP_TIME - actual_elapsed
     
     # Sleep if ahead of schedule
-    if sleep_needed > 0.001:
+    if sleep_needed > 0:
+        print(f"the control is leading rendering by : {sleep_needed*1000:.1f}ms")
         time.sleep(sleep_needed)
-    elif sleep_needed < -0.005:
-        # We're >5ms late
+    else:
         print(f"the control is lagging rendering by : {-sleep_needed*1000:.1f}ms")
     
     total_step_t0 = time.perf_counter()
@@ -153,7 +153,7 @@ class VLAPID:
         self.policy = SmolVLAPolicy.from_pretrained(model_id).to(device)
         self.policy.eval()
 
-        instruction = "Pick up the green block and move it to the target."
+        instruction = "Pick up the green block, then move to the target location and then place the cube at the target location on the surface."
         tokens = self.policy.model.vlm_with_expert.processor.tokenizer(
             instruction, return_tensors="pt"
         ).to(device)
@@ -205,6 +205,7 @@ class AsyncVLA:
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self._inference_loop, daemon=True)
         self.thread.start()
+        self.new_data_available = False
         print("AsyncVLA started")
     
     def _inference_loop(self):
@@ -218,16 +219,14 @@ class AsyncVLA:
                 
                 with self.lock:
                     self.latest_result = result
+                    self.new_data_available = True
                 
-                # Clear old results
                 try:
                     self.output_queue.get_nowait()
                 except queue.Empty:
                     pass
                 self.output_queue.put(result)
-                
-                
-                print(f"  VLA inference: {inference_time:.1f}ms")
+                print(f"  VLA inference took: {inference_time:.1f}ms")
                     
             except queue.Empty:
                 continue
@@ -238,7 +237,6 @@ class AsyncVLA:
         try:
             self.input_queue.put_nowait((img, state))
         except queue.Full:
-            # If queue full, remove old and add new
             try:
                 self.input_queue.get_nowait()
             except queue.Empty:
@@ -248,7 +246,9 @@ class AsyncVLA:
     def get_latest(self):
         """Get latest result"""
         with self.lock:
-            return self.latest_result.copy()
+            is_new = self.new_data_available
+            self.new_data_available = False
+            return self.latest_result.copy() , is_new
     
     def stop(self):
         self.running = False
@@ -262,192 +262,117 @@ def perform_task_vla(target_pos, destination_pos):
     vla = VLAPID("lerobot/smolvla_base", DEVICE)
     async_vla = AsyncVLA(vla)
     
-    VLA_TICK_RATE = 30  # Update VLA every 30 steps (300ms at 100Hz)
+    VLA_TICK_RATE = 30
     current_residual = np.zeros(3)
     
-   
-    START_REAL_TIME = time.time()
-    START_SIM_TIME = data.time
-
-    # --- PHASE 1: MOVE TO HOVER ---
+    # --- PHASE 1: HOVER ---
     print("\n=== PHASE 1: MOVING TO HOVER ===")
     for step in range(1000):
-        total_step_t0 = time.perf_counter() 
-        
+        total_step_t0 = time.perf_counter()
         ee_pos = get_ee_pos(obs)
-         # Define target: cube location + 0.15m above it
-        target_hover = np.array([*target_pos[:2], target_pos[2] + 0.15])
-                                #  ^^^^^^ XY from cube  ^^^^^^ Z = cube_height + 15cm
-        
+        target_hover = np.array([target_pos[0], target_pos[1], target_pos[2] + 0.15])
         delta = target_hover - ee_pos
         
         if step % VLA_TICK_RATE == 0:
             main_renderer.update_scene(data, camera=-1)
-            img = main_renderer.render()
-            state = obs["observation"].astype(np.float32)
-            state = np.pad(state, (0, max(0, 32 - state.shape[0])))[:32]
-            # Send to background thread
-            async_vla.submit(img, state)  
+            async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
         
-        current_residual = async_vla.get_latest()
-        
-        # HYBRID CONTROL: PID + VLA
-        # PID: P gain of 10.0 on position error
-        # VLA: Small correction (0.3 weight) from learned model       
-        xyz = (delta * 10.0) + (current_residual * 0.3)
-        action = np.append(xyz, 1.0)
-
+        res, _ = async_vla.get_latest()
+        action = np.append((delta * 10.0) + (res * 0.2), 1.0)
         obs, _, _, _, _ = env.step(clip_action(action, 0.3))
-        arm_logger.log_state(obs, data) 
-        apply_throttle_fixed()  # Enforce 100Hz control rate
-        render_dashboard(data, action)  # ← Render AFTER timing
+        apply_throttle_fixed()
+        render_dashboard(data, action)
+        if np.linalg.norm(delta[:2]) < 0.01: break
 
-        if np.linalg.norm(delta[:2]) < 0.01: 
-            print("✓ Hover position reached")
-            break
-
-
-    # --- PHASE 2: DESCENDING TO CUBE ---
+    # --- PHASE 2: DESCEND TO CUBE ---
     print("\n=== PHASE 2: DESCENDING TO CUBE ===")
-    START_REAL_TIME = time.time()
-    START_SIM_TIME = data.time
-
-    cube_body_id = mj_env.model.body('obj').id
-    cube_pos = data.xpos[cube_body_id].copy()
-    ee_pos = get_ee_pos(obs)
-    print(f"Cube Position: [{cube_pos[0]:.3f}, {cube_pos[1]:.3f}, {cube_pos[2]:.3f}]")
-    print(f"EE Position:   [{ee_pos[0]:.3f}, {ee_pos[1]:.3f}, {ee_pos[2]:.3f}]")
-    print(f"Initial Distance: {np.linalg.norm(ee_pos[:2] - cube_pos[:2]):.4f}m\n")
-
-    descent_complete = False
-    for step in range(500):
+    vla_alpha = 0.15
+    smoothed_vla = np.zeros(3)
+    for step in range(800):
         total_step_t0 = time.perf_counter()
-        
+        cube_body_id = mj_env.model.body('obj').id
         cube_pos = data.xpos[cube_body_id].copy()
         ee_pos = get_ee_pos(obs)
-        dist_to_cube = np.linalg.norm(ee_pos[:2] - cube_pos[:2])
-        delta = cube_pos - ee_pos
+        dist_xy = np.linalg.norm(ee_pos[:2] - cube_pos[:2])
         
         if step % VLA_TICK_RATE == 0:
             main_renderer.update_scene(data, camera=-1)
-            img = main_renderer.render()
-            state = np.pad(obs["observation"].astype(np.float32), (0, max(0, 32 - obs["observation"].shape[0])))[:32]
-            async_vla.submit(img, state)
+            async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
         
-        current_residual = async_vla.get_latest()
+        raw_vla, is_new = async_vla.get_latest()
+        if is_new: 
+            smoothed_vla = (vla_alpha * raw_vla) + ((1 - vla_alpha) * smoothed_vla)
         
-        if dist_to_cube > 0.08:
-            pid_xyz = delta * np.array([25.0, 25.0, 10.0])
-            xyz = (pid_xyz * 0.9) + (current_residual * 0.1)
-        elif dist_to_cube > 0.05:
-            pid_xyz = delta * np.array([20.0, 20.0, 8.0])
-            xyz = (pid_xyz * 0.8) + (current_residual * 0.2)
-        else:
-            pid_xyz = delta * np.array([15.0, 15.0, 6.0])
-            xyz = (pid_xyz * 0.7) + (current_residual * 0.3)
+        target_z = cube_pos[2] + 0.005
+        delta = np.array([cube_pos[0]-ee_pos[0], cube_pos[1]-ee_pos[1], target_z-ee_pos[2]])
+        xyz = (delta * 12.0) + (smoothed_vla * 0.05)
         
-        action = np.append(xyz, 1.0)
-        
-        if step % 20 == 0:
-            print(f"Step {step:3d} | Dist: {dist_to_cube:.4f}m | Z: {ee_pos[2]:.3f}m")
-
-        obs, _, _, _, _ = env.step(clip_action(action, max_delta=0.15))
-        arm_logger.log_state(obs, data)
-        apply_throttle_fixed()  # ← Just timing
-        render_dashboard(data, action)  # ← Render AFTER
-        
-        if dist_to_cube < 0.035 and ee_pos[2] < (cube_pos[2] + 0.01):
-            print(f"✓ Descent complete at step {step}")
-            descent_complete = True
-            break
-
-    print(f"Descent phase: {'COMPLETE' if descent_complete else 'TIMEOUT'}")
-
+        obs, _, _, _, _ = env.step(clip_action(np.append(xyz, 1.0), 0.15))
+        apply_throttle_fixed()
+        render_dashboard(data, xyz)
+        if dist_xy < 0.015 and abs(ee_pos[2] - target_z) < 0.01: break
 
     # --- PHASE 3: GRASP ---
     print("\n=== PHASE 3: GRASPING ===")
-    for i in range(150):
+    for _ in range(100):
         total_step_t0 = time.perf_counter()
         obs, _, _, _, _ = env.step(np.array([0, 0, 0, -1.0]))
-        arm_logger.log_state(obs, data)
-        apply_throttle_fixed()  # ← Just timing
-        render_dashboard(data, None)  # ← Render AFTER
-        
-        if i % 30 == 0:
-            fingers = mj_env.get_fingers_width()
-            f_val = fingers if np.isscalar(fingers) else fingers[0]
-            print(f"  Gripper closing... width: {f_val:.4f}")
+        apply_throttle_fixed(); render_dashboard(data, None)
 
-    print("✓ Gripper closed")
-
-
-    # --- PHASE 4: MOVE TO DESTINATION ---
-    print("\n=== PHASE 4: MOVING TO DESTINATION ===")
-    for step in range(1200):
+    # --- PHASE 4: TRANSPORT ---
+    print("\n=== PHASE 4: ALIGNING WITH RED SPOT ===")
+    target_site_id = mj_env.model.site('target').id
+    for step in range(800):
         total_step_t0 = time.perf_counter()
         ee_pos = get_ee_pos(obs)
-        current_target_site = data.site_xpos[mj_env.model.site('target').id].copy()
-        target_dest_hover = np.array([current_target_site[0], current_target_site[1], 0.15])
-        delta = target_dest_hover - ee_pos
+        actual_red_spot = data.site_xpos[target_site_id].copy()
+        delta = np.array([actual_red_spot[0], actual_red_spot[1], 0.15]) - ee_pos
         
         if step % VLA_TICK_RATE == 0:
             main_renderer.update_scene(data, camera=-1)
-            img = main_renderer.render()
-            state = np.pad(obs["observation"].astype(np.float32), (0, max(0, 32 - obs["observation"].shape[0])))[:32]
-            async_vla.submit(img, state)
+            async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
 
-        current_residual = async_vla.get_latest()
-        xyz = (delta * 10.0) + (current_residual * 0.5)
-        action = np.append(xyz, -1.0)
-        obs, _, _, _, _ = env.step(clip_action(action, 0.3))
-        arm_logger.log_state(obs, data) 
-        apply_throttle_fixed()  # ← Just timing
-        render_dashboard(data, action)  # ← Render AFTER
-        
-        if np.linalg.norm(delta[:2]) < 0.01: 
-            print("✓ Destination hover reached")
-            break
+        raw_vla, is_new = async_vla.get_latest()
+        # High gain XY to fight VLA bias
+        xyz = (delta * np.array([15.0, 15.0, 5.0])) + (raw_vla * 0.02)
+        obs, _, _, _, _ = env.step(clip_action(np.append(xyz, -1.0), 0.12))
+        apply_throttle_fixed()
+        render_dashboard(data, xyz)
+        if np.linalg.norm(delta[:2]) < 0.005: break
 
-
-    # --- PHASE 5: LOWER TO FLOOR ---
-    print("\n=== PHASE 5: LOWERING TO FLOOR ===")
-    for step in range(300):
+    # --- PHASE 5: PRECISION LOWERING (VLA OFF) ---
+    print("\n=== PHASE 5: VERTICAL DROP ===")
+    for step in range(400):
         total_step_t0 = time.perf_counter()
         ee_pos = get_ee_pos(obs)
-        target_floor = np.array([destination_pos[0], destination_pos[1], 0.02])
-        delta = target_floor - ee_pos
-        action = np.append(delta * 5.0, -1.0)
-        obs, _, _, _, _ = env.step(clip_action(action, max_delta=0.05))
-        arm_logger.log_state(obs, data)
-        apply_throttle_fixed()  # ← Just timing
-        render_dashboard(data, action)  # ← Render AFTER
+        actual_red_spot = data.site_xpos[target_site_id].copy()
         
-        if abs(ee_pos[2] - 0.02) < 0.002:
-            print("✓ Floor level reached")
+        # Target exact center, 2cm height
+        target_floor = np.array([actual_red_spot[0], actual_red_spot[1], 0.02])
+        delta = target_floor - ee_pos
+        
+        # No VLA here - Pure PID for 100% accuracy
+        xyz = delta * np.array([30.0, 30.0, 5.0])
+        obs, _, _, _, _ = env.step(clip_action(np.append(xyz, -1.0), 0.03))
+        apply_throttle_fixed()
+        render_dashboard(data, xyz)
+        
+        if abs(ee_pos[2] - 0.02) < 0.002: 
+            # Stabilize momentum
+            for _ in range(30):
+                env.step(np.array([0,0,0,-1.0]))
+                apply_throttle_fixed()
             break
 
-
-    # --- PHASE 6: RELEASE ---
-    print("\n=== PHASE 6: RELEASING ===")
-    for _ in range(50):
-        total_step_t0 = time.perf_counter()
-        obs, _, _, _, _ = env.step(np.array([0, 0, 0, 1.0]))
-        arm_logger.log_state(obs, data) 
-        apply_throttle_fixed()  # ← Just timing
-        render_dashboard(data, None)  # ← Render AFTER
-    print("✓ Gripper opened")
-
-
-    # --- PHASE 7: CLEAR AREA ---
-    print("\n=== PHASE 7: CLEARING AREA ===")
-    for _ in range(30):
-        total_step_t0 = time.perf_counter()
-        obs, _, _, _, _ = env.step(np.array([0, 0, 0.2, 1.0]))
-        arm_logger.log_state(obs, data) 
-        apply_throttle_fixed()  # ← Just timing
-        render_dashboard(data, None)  # ← Render AFTER
-    print("✓ Area cleared")
-
+    # --- PHASE 6 & 7: RELEASE & RETRACT ---
+    print("\n=== PHASE 6 & 7: FINISHING ===")
+    for _ in range(100): # Open
+        env.step(np.array([0, 0, 0, 1.0]))
+        apply_throttle_fixed()
+    for _ in range(100): # Lift
+        env.step(np.array([0, 0, 0.2, 1.0]))
+        apply_throttle_fixed()
+        
     async_vla.stop()
 
 
@@ -456,7 +381,7 @@ try:
     START_SIM_TIME = data.time
     BASE_REAL_TIME = START_REAL_TIME
     
-    # Stabilize
+   
     for _ in range(10):
         obs, _, _, _, _ = env.step(np.array([0, 0, 0, 0]))
 
@@ -466,20 +391,19 @@ try:
     target_goal_pos = get_goal_pos(obs)
     final_destination = np.array([target_site_pos[0], target_site_pos[1], 0.0]) 
 
+    
     print(f"\n{'='*60}")
     print(f"TASK INITIALIZATION")
     print(f"{'='*60}")
-    print(f"Object Position:  {cube_starting_pos}")
-    print(f"Target Position:  {final_destination}")
+    print(f"\nDetecting Object at: {cube_starting_pos}")
+    print(f"Target Destination: {final_destination}")
     print(f"Device:           {DEVICE}")
     print(f"{'='*60}\n")
-
-    # Execute the task
-    perform_task_vla(cube_starting_pos, final_destination)
     
-    print(f"\n{'='*60}")
+    perform_task_vla(cube_starting_pos, final_destination)
+
     print(f"✓ TASK COMPLETED SUCCESSFULLY")
-    print(f"{'='*60}\n")
+
 
 finally:
     env.close()
