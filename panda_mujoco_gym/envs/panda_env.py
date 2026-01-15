@@ -1,6 +1,9 @@
 import mujoco
 import numpy as np
 from gymnasium.core import ObsType
+import sys
+import gymnasium
+sys.modules["gymnasium.wrappers.time_limit"] = gymnasium.wrappers
 from gymnasium_robotics.envs.robot_env import MujocoRobotEnv
 from gymnasium_robotics.utils import rotations
 from typing import Optional, Any, SupportsFloat
