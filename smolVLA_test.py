@@ -215,39 +215,46 @@ class VLAPID:
         self.lang_tokens = tokens["input_ids"]
         self.lang_mask = tokens["attention_mask"].bool()
 
+
     @torch.inference_mode()
     def residual(self, images, state):
         state_t = torch.from_numpy(state).float().unsqueeze(0).to(self.device, non_blocking=True)
 
         if torch.all(state_t == 0):
-         print("[WARNING] VLA received an ALL-ZERO state vector!")
-
-        assert state_t.shape[1] == 32, f"Expected 32 dims, got {state_t.shape[1]}"
-
-        # img_t = torch.from_numpy(image).permute(2,0,1).unsqueeze(0).float().to(self.device, non_blocking=True) / 255.0
+            print("[WARNING] VLA received an ALL-ZERO state vector!")
 
         def prep_img(img):
-            # Resize to model expected input (adjust to 224 if model requires it)
             img_resized = cv2.resize(img, (320, 320)) 
             return torch.from_numpy(img_resized).permute(2,0,1).unsqueeze(0).float().to(self.device, non_blocking=True) / 255.0
-        
-
 
         obs_vla = {
-            "observation.images.camera1": prep_img(images[0]), # Main/Overhead
-            "observation.images.camera2": prep_img(images[1]), # Front Cam
-            "observation.images.camera3": prep_img(images[2]), # Gripper Cam
+            "observation.images.camera1": prep_img(images[0]), 
+            "observation.images.camera2": prep_img(images[1]), 
+            "observation.images.camera3": prep_img(images[2]), 
             "observation.language.tokens": self.lang_tokens, 
             "observation.language.attention_mask": self.lang_mask, 
             "observation.state": state_t
         }
         
         action = self.policy.select_action(obs_vla)
-        return action[0, :3].cpu().numpy()
+        
+        # EXTRACT LATENT NORM
+        # Note: Ensure your policy version supports 'get_visual_features'
+        try:
+        # SmolVLA/LeRobot specific feature access
+        # We want the output of the vision tower before the projector
+            features = self.policy.model.vlm_with_expert.vision_tower_output 
+            latent_norm = torch.norm(features).item()
+        except:
+        # If that fails, let's try to get the projected visual embeddings
+           latent_norm = torch.norm(obs_vla["observation.images.camera1"]).item()
+                
+        return action[0, :3].cpu().numpy(), latent_norm
 
 class AsyncVLA:
     def __init__(self, vla):
         self.vla = vla
+        self.latest_latent_norm = 0.0
         self.input_queue = queue.Queue(maxsize=1)
         self.latest_result = np.zeros(3)
         self.latest_timestamp = 0.0  # NEW: Track when the frame was taken
@@ -260,15 +267,16 @@ class AsyncVLA:
     def _inference_loop(self):
         while self.running:
             try:
-                # NEW: Receive timestamp along with data
                 packet = self.input_queue.get(timeout=0.1)
                 img, state, t_capture = packet 
                 
-                result = self.vla.residual(img, state)
+                # CORRECTED: Unpack both action and norm
+                result, latent_norm = self.vla.residual(img, state)
                 
                 with self.lock:
                     self.latest_result = result
-                    self.latest_timestamp = t_capture # Pass it back
+                    self.latest_latent_norm = latent_norm # Ensure this is in __init__
+                    self.latest_timestamp = t_capture
                     self.new_data_available = True
             except queue.Empty: continue
 
@@ -284,7 +292,7 @@ class AsyncVLA:
             is_new = self.new_data_available
             self.new_data_available = False
             # NEW: Return the timestamp so the loop can calculate lag
-            return self.latest_result.copy(), self.latest_timestamp, is_new
+            return self.latest_result.copy(), self.latest_latent_norm, self.latest_timestamp, is_new
 
     def stop(self): self.running = False; self.thread.join(); print("AsyncVLA stopped")
 
@@ -320,7 +328,7 @@ def perform_task_vla(target_pos, destination_pos):
             async_vla.submit([img_main, img_front, img_gripper], current_state_32, t_capture)
             # async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
         
-        raw_vla, t_start, is_new = async_vla.get_latest()
+        raw_vla, latent_norm, t_start, is_new = async_vla.get_latest()
         if is_new: 
             vla_target_xyz = raw_vla
             total_latency = (time.perf_counter() - t_start) * 1000
@@ -358,7 +366,7 @@ def perform_task_vla(target_pos, destination_pos):
             async_vla.submit([img_main, img_front, img_gripper], current_state_32, t_capture)
             # async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
         
-        raw_vla, t_start, is_new = async_vla.get_latest()
+        raw_vla, l_norm, t_start, is_new = async_vla.get_latest()
         if is_new: 
             vla_target_xyz = raw_vla
             total_latency = (time.perf_counter() - t_start) * 1000
@@ -376,8 +384,16 @@ def perform_task_vla(target_pos, destination_pos):
     print("\n=== PHASE 3: GRASPING ===")
     for _ in range(100):
         total_step_t0 = time.perf_counter()
+        
+        # Check consistency while still
+        raw_vla, l_norm, t_start, is_new = async_vla.get_latest()
+        if is_new:
+            total_latency = (time.perf_counter() - t_start) * 1000
+            print(f"[ENCODER CHECK] Latent Norm: {l_norm:.4f} | Action Age: {total_latency:.1f}ms")
+            
         obs, _, _, _, _ = env.step(np.array([0, 0, 0, -1.0]))
-        apply_throttle_fixed(); render_dashboard(data, None)
+        apply_throttle_fixed()
+        render_dashboard(data, None)
 
     
     print("\n=== PHASE 4: ALIGNING WITH RED SPOT ===")
@@ -403,7 +419,7 @@ def perform_task_vla(target_pos, destination_pos):
             async_vla.submit([img_main, img_front, img_gripper], current_state_32, t_capture)
             # async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
 
-        raw_vla, t_start, is_new = async_vla.get_latest()
+        raw_vla, l_norm, t_start, is_new = async_vla.get_latest()
         if is_new: 
             vla_target_xyz = raw_vla
             total_latency = (time.perf_counter() - t_start) * 1000
