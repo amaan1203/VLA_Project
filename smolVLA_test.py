@@ -12,6 +12,30 @@ from PIL import Image
 from gymnasium.envs.mujoco.mujoco_env import MujocoEnv
 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 from arm_state_logger import ArmStateLogger
+import sys
+from datetime import datetime
+
+# Generate a unique filename based on the current time
+log_filename = f"run_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+
+class Logger(object):
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log = open(filename, "a")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush() # Ensure it writes in real-time
+
+    def flush(self):
+        # This flush method is needed for python 3 compatibility.
+        pass
+
+# Redirect stdout to our new Logger class
+sys.stdout = Logger(log_filename)
+
+print(f"Logging session started. Saving to: {log_filename}")
 
 
 os.environ["MUJOCO_GL"] = "egl"
@@ -200,7 +224,7 @@ class VLAPID:
 
         assert state_t.shape[1] == 32, f"Expected 32 dims, got {state_t.shape[1]}"
 
-        img_t = torch.from_numpy(image).permute(2,0,1).unsqueeze(0).float().to(self.device, non_blocking=True) / 255.0
+        # img_t = torch.from_numpy(image).permute(2,0,1).unsqueeze(0).float().to(self.device, non_blocking=True) / 255.0
 
         def prep_img(img):
             # Resize to model expected input (adjust to 224 if model requires it)
@@ -226,37 +250,41 @@ class AsyncVLA:
         self.vla = vla
         self.input_queue = queue.Queue(maxsize=1)
         self.latest_result = np.zeros(3)
+        self.latest_timestamp = 0.0  # NEW: Track when the frame was taken
         self.new_data_available = False
         self.running = True
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self._inference_loop, daemon=True)
         self.thread.start()
-        print("AsyncVLA started")
 
     def _inference_loop(self):
         while self.running:
             try:
-                img, state = self.input_queue.get(timeout=0.1)
-                t_start = time.perf_counter()
+                # NEW: Receive timestamp along with data
+                packet = self.input_queue.get(timeout=0.1)
+                img, state, t_capture = packet 
+                
                 result = self.vla.residual(img, state)
-                inference_time = (time.perf_counter() - t_start) * 1000
+                
                 with self.lock:
                     self.latest_result = result
+                    self.latest_timestamp = t_capture # Pass it back
                     self.new_data_available = True
-                print(f"  VLA inference took: {inference_time:.1f}ms")
             except queue.Empty: continue
 
-    def submit(self, img, state):
+    def submit(self, img, state, t_capture):
+        """Submit with a specific capture timestamp"""
         if self.input_queue.full():
             try: self.input_queue.get_nowait()
             except queue.Empty: pass
-        self.input_queue.put_nowait((img, state))
+        self.input_queue.put_nowait((img, state, t_capture))
 
     def get_latest(self):
         with self.lock:
             is_new = self.new_data_available
             self.new_data_available = False
-            return self.latest_result.copy(), is_new
+            # NEW: Return the timestamp so the loop can calculate lag
+            return self.latest_result.copy(), self.latest_timestamp, is_new
 
     def stop(self): self.running = False; self.thread.join(); print("AsyncVLA stopped")
 
@@ -272,6 +300,7 @@ def perform_task_vla(target_pos, destination_pos):
 
     print("\n=== PHASE 1: MOVING TO HOVER ===")
     for step in range(1000):
+        t_capture = time.perf_counter()
         total_step_t0 = time.perf_counter()
         ee_pos = get_ee_pos(obs)
         target_hover = np.array([target_pos[0], target_pos[1], target_pos[2] + 0.15])
@@ -288,11 +317,16 @@ def perform_task_vla(target_pos, destination_pos):
             cam_renderer.update_scene(data, camera="gripper_front_chase")
             img_gripper = cam_renderer.render()
             current_state_32 = project_robot_state(mj_env, data)
-            async_vla.submit([img_main, img_front, img_gripper], current_state_32)
+            async_vla.submit([img_main, img_front, img_gripper], current_state_32, t_capture)
             # async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
         
-        raw_vla, is_new = async_vla.get_latest()
-        if is_new: vla_target_xyz = raw_vla
+        raw_vla, t_start, is_new = async_vla.get_latest()
+        if is_new: 
+            vla_target_xyz = raw_vla
+            total_latency = (time.perf_counter() - t_start) * 1000
+            print(f"[LATENCY MONITOR] Action Age: {total_latency:.1f}ms")
+            
+
         current_vla_residual = (smoothing_alpha * vla_target_xyz) + ((1 - smoothing_alpha) * current_vla_residual)
         
         action = np.append((delta * 10.0) + (current_vla_residual * 0.2), 1.0)
@@ -304,6 +338,7 @@ def perform_task_vla(target_pos, destination_pos):
     
     print("\n=== PHASE 2: DESCENDING TO CUBE ===")
     for step in range(800):
+        t_capture = time.perf_counter()
         total_step_t0 = time.perf_counter()
         cube_pos = data.xpos[mj_env.model.body('obj').id].copy()
         ee_pos = get_ee_pos(obs)
@@ -320,11 +355,14 @@ def perform_task_vla(target_pos, destination_pos):
             cam_renderer.update_scene(data, camera="gripper_front_chase")
             img_gripper = cam_renderer.render()
             current_state_32 = project_robot_state(mj_env, data)
-            async_vla.submit([img_main, img_front, img_gripper], current_state_32)
+            async_vla.submit([img_main, img_front, img_gripper], current_state_32, t_capture)
             # async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
         
-        raw_vla, is_new = async_vla.get_latest()
-        if is_new: vla_target_xyz = raw_vla
+        raw_vla, t_start, is_new = async_vla.get_latest()
+        if is_new: 
+            vla_target_xyz = raw_vla
+            total_latency = (time.perf_counter() - t_start) * 1000
+            print(f"[LATENCY MONITOR] Action Age: {total_latency:.1f}ms")
         current_vla_residual = (smoothing_alpha * vla_target_xyz) + ((1 - smoothing_alpha) * current_vla_residual)
         
         target_z = cube_pos[2] + 0.005
@@ -345,6 +383,7 @@ def perform_task_vla(target_pos, destination_pos):
     print("\n=== PHASE 4: ALIGNING WITH RED SPOT ===")
     target_site_id = mj_env.model.site('target').id
     for step in range(800):
+        t_capture = time.perf_counter()
         total_step_t0 = time.perf_counter()
         ee_pos = get_ee_pos(obs)
         actual_red_spot = data.site_xpos[target_site_id].copy()
@@ -361,11 +400,14 @@ def perform_task_vla(target_pos, destination_pos):
             cam_renderer.update_scene(data, camera="gripper_front_chase")
             img_gripper = cam_renderer.render()
             current_state_32 = project_robot_state(mj_env, data)
-            async_vla.submit([img_main, img_front, img_gripper], current_state_32)
+            async_vla.submit([img_main, img_front, img_gripper], current_state_32, t_capture)
             # async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
 
-        raw_vla, is_new = async_vla.get_latest()
-        if is_new: vla_target_xyz = raw_vla
+        raw_vla, t_start, is_new = async_vla.get_latest()
+        if is_new: 
+            vla_target_xyz = raw_vla
+            total_latency = (time.perf_counter() - t_start) * 1000
+            print(f"[LATENCY MONITOR] Action Age: {total_latency:.1f}ms")
         current_vla_residual = (smoothing_alpha * vla_target_xyz) + ((1 - smoothing_alpha) * current_vla_residual)
         
         xyz = (delta * np.array([15.0, 15.0, 5.0])) + (current_vla_residual * 0.02)
@@ -409,3 +451,5 @@ finally:
     env.close()
     video_thread.stop()
     print("Video saved as vla_robot_dashboard.mp4")
+    if hasattr(sys.stdout, "log"):
+        sys.stdout.log.close()
