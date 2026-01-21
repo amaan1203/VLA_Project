@@ -36,6 +36,49 @@ main_renderer = mujoco.Renderer(model, height=480, width=640)
 cam_renderer = mujoco.Renderer(model, height=240, width=320)
 
 
+
+def project_robot_state(mj_env, mj_data):
+    """
+    Extracts Franka Panda proprioception and pads to 32-dim.
+    Structure: [Joint_Pos (7), Gripper_Width (1), Padding (24)]
+    """
+    # 1. Get 7-DOF Joint Positions
+    # Franka joints in MuJoCo are usually indexed 0-6
+    qpos = mj_data.qpos[:7].copy() 
+    
+    # 2. Get Gripper Width
+    # mj_env usually provides a helper, otherwise extract from qpos
+    fingers = mj_env.get_fingers_width()
+    f_val = fingers if np.isscalar(fingers) else fingers[0]
+    
+    # 3. Combine and Pad
+    state_vector = np.concatenate([qpos, [f_val]]) # length 8
+    padded_state = np.zeros(32, dtype=np.float32)
+    padded_state[:len(state_vector)] = state_vector
+    
+    return padded_state
+
+def project_robot_state(mj_env, mj_data):
+    qpos = mj_data.qpos[:7].copy() 
+    fingers = mj_env.get_fingers_width()
+    f_val = fingers if np.isscalar(fingers) else fingers[0]
+    
+    state_vector = np.concatenate([qpos, [f_val]]) 
+    padded_state = np.zeros(32, dtype=np.float32)
+    padded_state[:len(state_vector)] = state_vector
+    
+    # --- ADD VERIFICATION LOG ---
+    # Log the first time this is called to verify shape and non-zero content
+    if not hasattr(project_robot_state, "verified"):
+        print(f"\n[VERIFICATION] State Projector Initialized")
+        print(f" -> Raw State (7 DOF + Gripper): {state_vector.shape}")
+        print(f" -> Padded Vector Shape: {padded_state.shape}")
+        print(f" -> Non-zero count: {np.count_nonzero(padded_state)}")
+        project_robot_state.verified = True
+    
+    return padded_state
+
+
 class VideoWriterThread:
     def __init__(self, filename, fps, resolution):
         self.writer = cv2.VideoWriter(filename, cv2.VideoWriter_fourcc(*'mp4v'), fps, resolution)
@@ -152,9 +195,19 @@ class VLAPID:
 
     @torch.inference_mode()
     def residual(self, image, state):
-        img_t = torch.from_numpy(image).permute(2,0,1).unsqueeze(0).float().to(self.device, non_blocking=True) / 255.0
         state_t = torch.from_numpy(state).float().unsqueeze(0).to(self.device, non_blocking=True)
-        obs_vla = {"observation.images.camera1": img_t, "observation.language.tokens": self.lang_tokens, "observation.language.attention_mask": self.lang_mask, "observation.state": state_t}
+
+        if torch.all(state_t == 0):
+         print("[WARNING] VLA received an ALL-ZERO state vector!")
+
+        assert state_t.shape[1] == 32, f"Expected 32 dims, got {state_t.shape[1]}"
+
+        img_t = torch.from_numpy(image).permute(2,0,1).unsqueeze(0).float().to(self.device, non_blocking=True) / 255.0
+        obs_vla = {"observation.images.camera1": img_t, 
+                   "observation.language.tokens": self.lang_tokens, 
+                   "observation.language.attention_mask": self.lang_mask, 
+                   "observation.state": state_t}
+        
         action = self.policy.select_action(obs_vla)
         return action[0, :3].cpu().numpy()
 
@@ -216,7 +269,10 @@ def perform_task_vla(target_pos, destination_pos):
         
         if step % VLA_TICK_RATE == 0:
             main_renderer.update_scene(data, camera=-1)
-            async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
+            current_state_32 = project_robot_state(mj_env, data)
+            img = main_renderer.render()
+            async_vla.submit(img, current_state_32)
+            # async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
         
         raw_vla, is_new = async_vla.get_latest()
         if is_new: vla_target_xyz = raw_vla
@@ -238,7 +294,12 @@ def perform_task_vla(target_pos, destination_pos):
         
         if step % VLA_TICK_RATE == 0:
             main_renderer.update_scene(data, camera=-1)
-            async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
+            
+            main_renderer.update_scene(data, camera=-1)
+            current_state_32 = project_robot_state(mj_env, data)
+            img = main_renderer.render()
+            async_vla.submit(img, current_state_32)
+            # async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
         
         raw_vla, is_new = async_vla.get_latest()
         if is_new: vla_target_xyz = raw_vla
@@ -269,7 +330,12 @@ def perform_task_vla(target_pos, destination_pos):
         
         if step % VLA_TICK_RATE == 0:
             main_renderer.update_scene(data, camera=-1)
-            async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
+
+            main_renderer.update_scene(data, camera=-1)
+            current_state_32 = project_robot_state(mj_env, data)
+            img = main_renderer.render()
+            async_vla.submit(img, current_state_32)
+            # async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
 
         raw_vla, is_new = async_vla.get_latest()
         if is_new: vla_target_xyz = raw_vla
