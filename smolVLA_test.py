@@ -151,7 +151,7 @@ def render_dashboard(data, current_vla_action):
     cv2.putText(main_bgr, f"EE_X: {ee_pos[0]:.3f}", (15, 60), font, scale, (255,255,255), thickness)
     cv2.putText(main_bgr, f"EE_Y: {ee_pos[1]:.3f}", (15, 90), font, scale, (255,255,255), thickness)
     cv2.putText(main_bgr, f"EE_Z: {ee_pos[2]:.3f}", (15, 120), font, scale, (255,255,255), thickness)
-    cv2.putText(main_bgr, f"GRIP: {f_val:.4f}", (15, 150), font, scale, (255af,255,255), thickness)
+    cv2.putText(main_bgr, f"GRIP: {f_val:.4f}", (15, 150), font, scale, (255,255,255), thickness)
     cv2.putText(main_bgr, f"DEVICE: {DEVICE}", (15, 180), font, scale, (0, 255, 0), thickness)
 
     cv2.putText(main_bgr, f"DRIFT: {current_drift:.1f}ms", (350, 30), font, scale, drift_color, thickness)
