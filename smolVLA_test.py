@@ -13,13 +13,13 @@ from gymnasium.envs.mujoco.mujoco_env import MujocoEnv
 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 from arm_state_logger import ArmStateLogger
 
-# --- GPU & SYSTEM CONFIG ---
+
 os.environ["MUJOCO_GL"] = "egl"
 os.environ["NVIDIA_VISIBLE_DEVICES"] = "0"
 
 if torch.cuda.is_available():
     DEVICE = torch.device("cuda")
-    torch.backends.cudnn.benchmark = True # Optimized for 3090
+    torch.backends.cudnn.benchmark = True 
     print(f"Using GPU: {torch.cuda.get_device_name(0)}")
 else:
     DEVICE = torch.device("cpu")
@@ -31,11 +31,11 @@ mj_env: MujocoEnv = env.unwrapped
 model = mj_env.model
 data = mj_env.data
 
-# --- RENDERING SETUP ---
+
 main_renderer = mujoco.Renderer(model, height=480, width=640)
 cam_renderer = mujoco.Renderer(model, height=240, width=320)
 
-# --- THREADED VIDEO WRITER (Prevents Control Lag) ---
+
 class VideoWriterThread:
     def __init__(self, filename, fps, resolution):
         self.writer = cv2.VideoWriter(filename, cv2.VideoWriter_fourcc(*'mp4v'), fps, resolution)
@@ -57,7 +57,7 @@ class VideoWriterThread:
         try:
             self.queue.put_nowait(frame)
         except queue.Full:
-            pass # Skip frame if disk I/O is slow to keep control 100Hz
+            pass 
 
     def stop(self):
         self.running = False
@@ -66,13 +66,12 @@ class VideoWriterThread:
 
 video_thread = VideoWriterThread('vla_robot_dashboard.mp4', 30, (640, 720))
 
-# --- GLOBAL TRACKING ---
+
 DRIFT_HISTORY = []
 total_step_t0 = time.perf_counter()
 obs, info = env.reset()
 START_REAL_TIME = time.time()
 
-# --- UTILITIES ---
 def get_ee_pos(obs): return obs["observation"][:3]
 def get_cube_pos(obs): return obs["achieved_goal"]
 def get_goal_pos(obs): return obs["desired_goal"]
@@ -141,7 +140,6 @@ def apply_throttle_fixed():
         print(f"the control is lagging rendering by : {-sleep_needed*1000:.1f}ms")
     total_step_t0 = time.perf_counter()
 
-# --- VLA & ASYNC LOGIC ---
 class VLAPID:
     def __init__(self, model_id, device):
         self.device = device
@@ -199,7 +197,6 @@ class AsyncVLA:
 
     def stop(self): self.running = False; self.thread.join(); print("AsyncVLA stopped")
 
-# --- MAIN TASK PHASES ---
 def perform_task_vla(target_pos, destination_pos):
     global obs, total_step_t0
     vla = VLAPID("lerobot/smolvla_base", DEVICE)
@@ -210,7 +207,6 @@ def perform_task_vla(target_pos, destination_pos):
     current_vla_residual = np.zeros(3)
     smoothing_alpha = 0.15 
 
-    # --- PHASE 1: HOVER ---
     print("\n=== PHASE 1: MOVING TO HOVER ===")
     for step in range(1000):
         total_step_t0 = time.perf_counter()
@@ -232,7 +228,7 @@ def perform_task_vla(target_pos, destination_pos):
         render_dashboard(data, action)
         if np.linalg.norm(delta[:2]) < 0.01: break
 
-    # --- PHASE 2: DESCEND TO CUBE ---
+    
     print("\n=== PHASE 2: DESCENDING TO CUBE ===")
     for step in range(800):
         total_step_t0 = time.perf_counter()
@@ -256,14 +252,13 @@ def perform_task_vla(target_pos, destination_pos):
         apply_throttle_fixed(); render_dashboard(data, xyz)
         if dist_xy < 0.015 and abs(ee_pos[2] - target_z) < 0.01: break
 
-    # --- PHASE 3: GRASP ---
     print("\n=== PHASE 3: GRASPING ===")
     for _ in range(100):
         total_step_t0 = time.perf_counter()
         obs, _, _, _, _ = env.step(np.array([0, 0, 0, -1.0]))
         apply_throttle_fixed(); render_dashboard(data, None)
 
-    # --- PHASE 4: TRANSPORT ---
+    
     print("\n=== PHASE 4: ALIGNING WITH RED SPOT ===")
     target_site_id = mj_env.model.site('target').id
     for step in range(800):
@@ -285,7 +280,6 @@ def perform_task_vla(target_pos, destination_pos):
         apply_throttle_fixed(); render_dashboard(data, xyz)
         if np.linalg.norm(delta[:2]) < 0.005: break
 
-    # --- PHASE 5: PRECISION LOWERING ---
     print("\n=== PHASE 5: VERTICAL DROP ===")
     for step in range(400):
         total_step_t0 = time.perf_counter()
@@ -298,13 +292,13 @@ def perform_task_vla(target_pos, destination_pos):
         apply_throttle_fixed(); render_dashboard(data, xyz)
         if abs(ee_pos[2] - 0.02) < 0.002: break
 
-    # --- PHASE 6 & 7: FINISHING ---
+    
     print("\n=== PHASE 6 & 7: FINISHING ===")
     for _ in range(100): env.step(np.array([0, 0, 0, 1.0])); apply_throttle_fixed()
     for _ in range(100): env.step(np.array([0, 0, 0.2, 1.0])); apply_throttle_fixed()
     async_vla.stop()
 
-# --- EXECUTION ---
+
 try:
     print(f"Using MuJoCo GL Backend: {os.environ['MUJOCO_GL']}")
     for _ in range(10): obs, _, _, _, _ = env.step(np.array([0, 0, 0, 0]))
@@ -317,7 +311,8 @@ try:
     print(f"✓ TASK COMPLETED SUCCESSFULLY")
 
 finally:
+    del main_renderer
+    del cam_renderer
     env.close()
     video_thread.stop()
     print("Video saved as vla_robot_dashboard.mp4")
-
