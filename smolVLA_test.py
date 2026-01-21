@@ -36,7 +36,6 @@ main_renderer = mujoco.Renderer(model, height=480, width=640)
 cam_renderer = mujoco.Renderer(model, height=240, width=320)
 
 
-
 def project_robot_state(mj_env, mj_data):
     """
     Extracts Franka Panda proprioception and pads to 32-dim.
@@ -109,7 +108,6 @@ class VideoWriterThread:
 
 video_thread = VideoWriterThread('vla_robot_dashboard.mp4', 30, (640, 720))
 
-
 DRIFT_HISTORY = []
 total_step_t0 = time.perf_counter()
 obs, info = env.reset()
@@ -153,7 +151,7 @@ def render_dashboard(data, current_vla_action):
     cv2.putText(main_bgr, f"EE_X: {ee_pos[0]:.3f}", (15, 60), font, scale, (255,255,255), thickness)
     cv2.putText(main_bgr, f"EE_Y: {ee_pos[1]:.3f}", (15, 90), font, scale, (255,255,255), thickness)
     cv2.putText(main_bgr, f"EE_Z: {ee_pos[2]:.3f}", (15, 120), font, scale, (255,255,255), thickness)
-    cv2.putText(main_bgr, f"GRIP: {f_val:.4f}", (15, 150), font, scale, (255,255,255), thickness)
+    cv2.putText(main_bgr, f"GRIP: {f_val:.4f}", (15, 150), font, scale, (255af,255,255), thickness)
     cv2.putText(main_bgr, f"DEVICE: {DEVICE}", (15, 180), font, scale, (0, 255, 0), thickness)
 
     cv2.putText(main_bgr, f"DRIFT: {current_drift:.1f}ms", (350, 30), font, scale, drift_color, thickness)
@@ -194,7 +192,7 @@ class VLAPID:
         self.lang_mask = tokens["attention_mask"].bool()
 
     @torch.inference_mode()
-    def residual(self, image, state):
+    def residual(self, images, state):
         state_t = torch.from_numpy(state).float().unsqueeze(0).to(self.device, non_blocking=True)
 
         if torch.all(state_t == 0):
@@ -203,10 +201,22 @@ class VLAPID:
         assert state_t.shape[1] == 32, f"Expected 32 dims, got {state_t.shape[1]}"
 
         img_t = torch.from_numpy(image).permute(2,0,1).unsqueeze(0).float().to(self.device, non_blocking=True) / 255.0
-        obs_vla = {"observation.images.camera1": img_t, 
-                   "observation.language.tokens": self.lang_tokens, 
-                   "observation.language.attention_mask": self.lang_mask, 
-                   "observation.state": state_t}
+
+        def prep_img(img):
+            # Resize to model expected input (adjust to 224 if model requires it)
+            img_resized = cv2.resize(img, (320, 320)) 
+            return torch.from_numpy(img_resized).permute(2,0,1).unsqueeze(0).float().to(self.device, non_blocking=True) / 255.0
+        
+
+
+        obs_vla = {
+            "observation.images.camera1": prep_img(images[0]), # Main/Overhead
+            "observation.images.camera2": prep_img(images[1]), # Front Cam
+            "observation.images.camera3": prep_img(images[2]), # Gripper Cam
+            "observation.language.tokens": self.lang_tokens, 
+            "observation.language.attention_mask": self.lang_mask, 
+            "observation.state": state_t
+        }
         
         action = self.policy.select_action(obs_vla)
         return action[0, :3].cpu().numpy()
@@ -269,9 +279,16 @@ def perform_task_vla(target_pos, destination_pos):
         
         if step % VLA_TICK_RATE == 0:
             main_renderer.update_scene(data, camera=-1)
+            cam_renderer.update_scene(data, camera="front_cam")
+            # Capture the 3 streams
+            img_main = main_renderer.render()
+            img_front = cam_renderer.render()
+            
+            # For the gripper view, we can use the cam_renderer again
+            cam_renderer.update_scene(data, camera="gripper_front_chase")
+            img_gripper = cam_renderer.render()
             current_state_32 = project_robot_state(mj_env, data)
-            img = main_renderer.render()
-            async_vla.submit(img, current_state_32)
+            async_vla.submit([img_main, img_front, img_gripper], current_state_32)
             # async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
         
         raw_vla, is_new = async_vla.get_latest()
@@ -294,11 +311,16 @@ def perform_task_vla(target_pos, destination_pos):
         
         if step % VLA_TICK_RATE == 0:
             main_renderer.update_scene(data, camera=-1)
+            cam_renderer.update_scene(data, camera="front_cam")
+            # Capture the 3 streams
+            img_main = main_renderer.render()
+            img_front = cam_renderer.render()
             
-            main_renderer.update_scene(data, camera=-1)
+            # For the gripper view, we can use the cam_renderer again
+            cam_renderer.update_scene(data, camera="gripper_front_chase")
+            img_gripper = cam_renderer.render()
             current_state_32 = project_robot_state(mj_env, data)
-            img = main_renderer.render()
-            async_vla.submit(img, current_state_32)
+            async_vla.submit([img_main, img_front, img_gripper], current_state_32)
             # async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
         
         raw_vla, is_new = async_vla.get_latest()
@@ -330,11 +352,16 @@ def perform_task_vla(target_pos, destination_pos):
         
         if step % VLA_TICK_RATE == 0:
             main_renderer.update_scene(data, camera=-1)
-
-            main_renderer.update_scene(data, camera=-1)
+            cam_renderer.update_scene(data, camera="front_cam")
+            # Capture the 3 streams
+            img_main = main_renderer.render()
+            img_front = cam_renderer.render()
+            
+            # For the gripper view, we can use the cam_renderer again
+            cam_renderer.update_scene(data, camera="gripper_front_chase")
+            img_gripper = cam_renderer.render()
             current_state_32 = project_robot_state(mj_env, data)
-            img = main_renderer.render()
-            async_vla.submit(img, current_state_32)
+            async_vla.submit([img_main, img_front, img_gripper], current_state_32)
             # async_vla.submit(main_renderer.render(), obs["observation"].astype(np.float32))
 
         raw_vla, is_new = async_vla.get_latest()
